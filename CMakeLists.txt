@@ -1,7 +1,6 @@
-cmake_minimum_required(VERSION 3.10.0)
+cmake_minimum_required(VERSION 3.21.0)
 project(hook VERSION 0.1.0 LANGUAGES C CXX)
 
-add_definitions(-DZYDIS_STATIC_DEFINE)
 add_subdirectory(deps/Zydis)
 
 add_library(${PROJECT_NAME} INTERFACE)
@@ -32,7 +31,10 @@ endif()
 add_library(hook::hook ALIAS ${PROJECT_NAME})
 
 
-include(CTest)
+if (PROJECT_IS_TOP_LEVEL)
+    include(CTest)
+endif()
+
 enable_testing()
 if(BUILD_TESTING)
     add_subdirectory(tests)
