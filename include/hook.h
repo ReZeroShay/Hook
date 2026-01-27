@@ -1,4 +1,3 @@
-#include <stdio.h>
 #include <Zydis.h>
 #include <atomic>
 #include <cstdint>
@@ -278,8 +277,6 @@ template <typename R, typename... Args> struct HookInvocation<R (*)(Args...)> : 
         }
     }
 };
-
-#include <errno.h>
 template <typename Fn> struct InlineHook : HookInvocation<Fn> {
     using FnType = typename HookInvocation<Fn>::FnType;
 
@@ -559,3 +556,18 @@ template <typename Fn> struct InlineHook : HookInvocation<Fn> {
     std::size_t prologue_size{0};
     std::uint8_t *invocation_prologue{nullptr};
 };
+
+/**
+ * @brief Creates a persistent InlineHook instance.
+ * @tparam Fn Target function signature.
+ * @return Pointer to an InlineHook instance allocated on the heap.
+ */
+template <typename Fn> [[nodiscard]] INLINE inline InlineHook<Fn> *MakeInlineHook() {
+    auto *instance = new (std::nothrow) InlineHook<Fn>();
+
+    // if (instance) {
+    //     instance > tl_reentrant.store(false, std::memory_order_relaxed);
+    // }
+
+    return instance;
+}
