@@ -304,6 +304,7 @@ template <typename R, typename... Args> struct HookInvocation<R (*)(Args...)> : 
 };
 template <typename Fn> struct InlineHook : HookInvocation<Fn> {
     using FnType = typename HookInvocation<Fn>::FnType;
+    using typename HookInvocation<Fn>::Self;
 
     constexpr InlineHook() {}
 
