@@ -1,6 +1,5 @@
 #pragma once
 #include <Zydis.h>
-#include <atomic>
 #include <cstdint>
 #include <array>
 #include <type_traits>
@@ -47,14 +46,14 @@
 namespace witch_cult {
     inline std::uint8_t *TryAllocateNear(std::uint8_t *nearest) {
         const size_t alloc_size = 0x1000;
-        const intptr_t search_size = 0x80000000; // 2GB
+        const intptr_t search_size = 0x80000000;
         uintptr_t addr = reinterpret_cast<uintptr_t>(nearest);
         if (nearest == nullptr) {
             return nullptr;
         }
 #ifdef _WIN32
-        const uint64_t radius = 0x80000000ULL; // 2GB
-        const uintptr_t align = 0x10000;       // 64KB 对齐（Windows 分配粒度）
+        const uint64_t radius = 0x80000000ULL;
+        const uintptr_t align = 0x10000;
 
         if (nearest == nullptr) {
             return nullptr;
@@ -63,7 +62,6 @@ namespace witch_cult {
         const uintptr_t center = reinterpret_cast<uintptr_t>(nearest);
         const uintptr_t maxPtr = (uintptr_t)UINTPTR_MAX;
 
-        // 用 64 位中间值计算，避免溢出，然后 clamp 到 uintptr_t 范围
         uint64_t lower64 = (center > radius) ? (uint64_t)center - radius : 0;
         uint64_t upper64 = (uint64_t)center + radius;
         if (upper64 > (uint64_t)maxPtr)
@@ -72,19 +70,16 @@ namespace witch_cult {
         const uintptr_t lower = static_cast<uintptr_t>(lower64);
         const uintptr_t upper = static_cast<uintptr_t>(upper64);
 
-        // 将起点向下对齐到 64KB
         const uintptr_t start = center & ~(align - 1);
 
         MEMORY_BASIC_INFORMATION mbi;
 
-        // Helper lambda：尝试在 mbi 表示的 free region 中分配
         auto try_alloc_in_region = [&](uintptr_t regionBase, SIZE_T regionSize) -> std::uint8_t * {
             if (regionSize < alloc_size)
                 return nullptr;
             uintptr_t rb = (uintptr_t)regionBase;
             uintptr_t rs = (uintptr_t)regionSize;
 
-            // 首选：区域尾部向下对齐后分配（更靠近 center）
             uintptr_t candidate = rb + rs - alloc_size;
             candidate &= ~(align - 1); // 向下对齐
             if (candidate < rb)
@@ -94,8 +89,7 @@ namespace witch_cult {
             if (buf)
                 return (std::uint8_t *)buf;
 
-            // 备选：区域头部，向上对齐
-            uintptr_t alt = (rb + (align - 1)) & ~(align - 1); // 向上对齐
+            uintptr_t alt = (rb + (align - 1)) & ~(align - 1);
             if (alt + alloc_size <= rb + rs) {
                 buf = VirtualAlloc((LPVOID)alt, alloc_size, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
                 if (buf)
@@ -104,7 +98,6 @@ namespace witch_cult {
             return nullptr;
         };
 
-        // 向下搜索（包括 start）
         if (start >= lower) {
             uint64_t steps_down = (start - lower) / align;
             for (uint64_t i = 0; i <= steps_down; ++i) {
@@ -119,7 +112,6 @@ namespace witch_cult {
             }
         }
 
-        // 向上搜索（注意：从 start+align 开始，避免重复检查 start）
         if (upper >= start + align) {
             uint64_t steps_up = (upper - start) / align;
             for (uint64_t i = 1; i <= steps_up; ++i) {
@@ -138,14 +130,12 @@ namespace witch_cult {
 #else
         void *buf{nullptr};
         const size_t page_size = sysconf(_SC_PAGESIZE);
-        // 系统内存页大小必须是 2 的幂
         if (page_size == 0 || (page_size & (page_size - 1)) != 0) {
             LOG_ERROR("Invalid system page size: %zu (must be power of two)", page_size);
             return nullptr;
         }
 
         for (intptr_t offset = 0; offset < search_size; offset += 1) {
-            // 向下搜索2GB范围的内存
             uintptr_t try_addr = addr - offset;
             void *ptr = mmap(std::bit_cast<void *>(try_addr), alloc_size, PROT_READ | PROT_WRITE | PROT_EXEC,
                              MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
@@ -154,18 +144,15 @@ namespace witch_cult {
                 buf = ptr;
                 break;
             }
-            // 向上搜索2GB范围的内存
             try_addr = addr + offset;
             ptr = mmap(std::bit_cast<void *>(try_addr), alloc_size, PROT_READ | PROT_WRITE | PROT_EXEC,
                        MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
-            // 找到
             if (ptr != MAP_FAILED && std::bit_cast<uintptr_t>(ptr) == try_addr) {
                 buf = ptr;
                 break;
             }
         }
         if (buf == nullptr) {
-            // 如果附近都找不到 → 讓 kernel 自己決定位置
             buf = mmap(nullptr, alloc_size, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         }
         if (buf == MAP_FAILED) {
@@ -236,12 +223,12 @@ namespace witch_cult {
     };
     struct HookContext {
         alignas(4) std::uint32_t reentrant{0};
-        void *user_data;
+        void *userData{nullptr};
         std::uint8_t *target_fn{nullptr}; // 原函数地址
         std::uint8_t *detour_fn{nullptr}; // 用户传入的 hook 回调函数
         std::uint8_t *trampoline{nullptr};
         HookType hook_type;
-        bool use_original_result{false};
+        bool passThrough{false};
     };
 
     template <typename T> struct HookInvocation : HookContext {};
@@ -255,42 +242,42 @@ namespace witch_cult {
          *
          * @return Pointer to the current instance
          */
-        WITCH_INLINE static auto Self() {
+        WITCH_INLINE static auto self() {
 #ifdef _WIN32
-            HookInvocation *self =
+            HookInvocation *instance =
                 reinterpret_cast<HookInvocation *>(reinterpret_cast<_NT_TIB *>(NtCurrentTeb())->ArbitraryUserPointer);
-            return self;
+            return instance;
 #else
             uint64_t value{0};
             __asm__ __volatile__("movq %%fs:-0x20, %0" : "=r"(value) : : "memory");
-            HookInvocation *self = std::bit_cast<HookInvocation *>(value);
-            return self;
+            HookInvocation *instance = std::reinterpret_cast<HookInvocation *>(value);
+            return instance;
 #endif
         }
-        WITCH_NOINLINE static ReturnType InvocationEntry(Args... args) {
-            return Self()->Dispatch(std::forward<Args>(args)...);
+        WITCH_NOINLINE static ReturnType invocationEntry(Args... args) {
+            return self()->dispatch(std::forward<Args>(args)...);
         }
-        inline ReturnType Dispatch(Args... args) {
+        inline ReturnType dispatch(Args... args) {
             ReturnType original_result, new_result;
             bool was_free = false;
 
             ReentrantGuard guard(&this->reentrant);
             if (!guard) {
-                original_result = new_result = InvokeTarget(std::forward<Args>(args)...);
+                original_result = new_result = invokeOriginal(std::forward<Args>(args)...);
                 return original_result;
             }
 
             if (hook_type == EnterHook) {
-                new_result = InvokeDetour(std::forward<Args>(args)...);
-                original_result = InvokeTarget(std::forward<Args>(args)...);
+                new_result = invokeDetour(std::forward<Args>(args)...);
+                original_result = invokeOriginal(std::forward<Args>(args)...);
             } else if (hook_type == ExitHook) {
-                original_result = InvokeTarget(std::forward<Args>(args)...);
-                new_result = InvokeDetour(std::forward<Args>(args)...);
+                original_result = invokeOriginal(std::forward<Args>(args)...);
+                new_result = invokeDetour(std::forward<Args>(args)...);
             } else if (hook_type == ReplaceHook) {
-                original_result = new_result = InvokeDetour(std::forward<Args>(args)...);
+                original_result = new_result = invokeDetour(std::forward<Args>(args)...);
             }
 
-            ReturnType result = use_original_result ? original_result : new_result;
+            ReturnType result = passThrough ? original_result : new_result;
             return result;
         }
         /**
@@ -301,7 +288,7 @@ namespace witch_cult {
          * @param args Arguments to pass to the original function.
          * @return Result of the original function, or 0 if it returns void.
          */
-        inline ReturnType InvokeTarget(Args... args) {
+        inline ReturnType invokeOriginal(Args... args) {
             auto fn = reinterpret_cast<FnType>(trampoline);
             if constexpr (std::is_same_v<R, void>) {
                 fn(std::forward<Args>(args)...);
@@ -310,7 +297,7 @@ namespace witch_cult {
                 return fn(std::forward<Args>(args)...);
             }
         }
-        inline ReturnType InvokeDetour(Args... args) {
+        inline ReturnType invokeDetour(Args... args) {
             auto fn = reinterpret_cast<FnType>(detour_fn);
             if constexpr (std::is_same_v<R, void>) {
                 fn(std::forward<Args>(args)...);
@@ -322,42 +309,11 @@ namespace witch_cult {
     };
     template <typename Fn> struct InlineHook : HookInvocation<Fn> {
         using FnType = typename HookInvocation<Fn>::FnType;
-        using typename HookInvocation<Fn>::Self;
+        using typename HookInvocation<Fn>::self;
 
         constexpr InlineHook() {}
 
         auto BuildJumpToInvocationPrologue() {
-#if 0
-        std::array<ZydisEncoderRequest, 2> req;
-        std::array<ZyanU8, ZYDIS_MAX_INSTRUCTION_LENGTH * 2> encoded;
-        ZyanUSize encoded_length = ZYDIS_MAX_INSTRUCTION_LENGTH;
-        size_t length{0};
-
-        memset(&req, 0, sizeof(req));
-
-        req[0].mnemonic = ZYDIS_MNEMONIC_MOV;
-        req[0].machine_mode = ZYDIS_MACHINE_MODE_LONG_64;
-        req[0].operand_count = 2;
-        req[0].operands[0].type = ZYDIS_OPERAND_TYPE_REGISTER;
-        req[0].operands[0].reg.value = ZYDIS_REGISTER_RAX;
-        req[0].operands[1].type = ZYDIS_OPERAND_TYPE_IMMEDIATE;
-        req[0].operands[1].imm.s = reinterpret_cast<intptr_t>(invocation_prologue);
-        req[1].mnemonic = ZYDIS_MNEMONIC_JMP;
-        req[1].machine_mode = ZYDIS_MACHINE_MODE_LONG_64;
-        req[1].operand_count = 1;
-        req[1].operands[0].type = ZYDIS_OPERAND_TYPE_REGISTER;
-        req[1].operands[0].reg.value = ZYDIS_REGISTER_RAX;
-        size_t total_length = 0;
-        for (auto &item : req) {
-            encoded_length = ZYDIS_MAX_INSTRUCTION_LENGTH;
-            if (auto result = ZydisEncoderEncodeInstruction(&item, &encoded[length], &encoded_length);
-                ZYAN_FAILED(result)) {
-                LOG_ERROR("Instruction encoding failed: mnemonic=%d statuss=0x%08X", item.mnemonic, result);
-                return false;
-            }
-            length += encoded_length;
-        }
-#else
             ZyanUSize length = ZYDIS_MAX_INSTRUCTION_LENGTH;
             std::array<ZyanU8, ZYDIS_MAX_INSTRUCTION_LENGTH> encoded;
             ZydisEncoderRequest req{};
@@ -383,7 +339,6 @@ namespace witch_cult {
                 LOG_ERROR("Instruction encoding failed: mnemonic=%d statuss=0x%08X", req.mnemonic, result);
                 return false;
             }
-#endif
             BuildTrampolineFromPrologue(this->target_fn, length);
             WriteProtectedMemory((void *)this->target_fn, encoded.data(), length);
 #if defined(_MSC_VER)
@@ -433,7 +388,7 @@ namespace witch_cult {
             req[2].operands[0].type = ZYDIS_OPERAND_TYPE_REGISTER;
             req[2].operands[0].reg.value = ZYDIS_REGISTER_RAX;
             req[2].operands[1].type = ZYDIS_OPERAND_TYPE_IMMEDIATE;
-            req[2].operands[1].imm.s = reinterpret_cast<intptr_t>(&HookInvocation<Fn>::InvocationEntry);
+            req[2].operands[1].imm.s = reinterpret_cast<intptr_t>(&HookInvocation<Fn>::invocationEntry);
             req[3].mnemonic = ZYDIS_MNEMONIC_JMP;
             req[3].machine_mode = ZYDIS_MACHINE_MODE_LONG_64;
             req[3].operand_count = 1;
@@ -469,14 +424,14 @@ namespace witch_cult {
         /**
          * @brief Set the user data pointer.
          *
-         * The user_data pointer must remain valid for the entire
+         * The userData pointer must remain valid for the entire
          * lifetime of this instance.
          *
-         * @param user_data Pointer to user-owned data.
+         * @param userData Pointer to user-owned data.
          */
-        void SetUserData(void *user_data) { this->user_data = user_data; }
+        void SetUserData(void *userData) { this->userData = userData; }
 
-        bool Install(FnType targetAddr, FnType hookAddr, HookType hook_type, bool use_original_result) {
+        bool install(FnType targetAddr, FnType hookAddr, HookType hook_type, bool passThrough) {
             if (hooked) {
                 LOG_WARN("Hook already installed, skipping");
                 return false;
@@ -484,7 +439,7 @@ namespace witch_cult {
             invocation_prologue = TryAllocateNear(reinterpret_cast<std::uint8_t *>(targetAddr));
             this->trampoline = invocation_prologue + 200;
             this->hook_type = hook_type;
-            this->use_original_result = use_original_result;
+            this->passThrough = passThrough;
             this->target_fn = reinterpret_cast<std::uint8_t *>(targetAddr);
             this->detour_fn = reinterpret_cast<std::uint8_t *>(hookAddr);
             BuildJumpToInvocation();
@@ -617,7 +572,7 @@ namespace witch_cult {
      * @tparam Fn Target function signature.
      * @return Pointer to an InlineHook instance allocated on the heap.
      */
-    template <typename Fn> [[nodiscard]] WITCH_INLINE inline InlineHook<Fn> *MakeInlineHook() {
+    template <typename Fn> [[nodiscard]] WITCH_INLINE inline InlineHook<Fn> *makeInlineHook() {
         auto *instance = new (std::nothrow) InlineHook<Fn>();
         return instance;
     }
