@@ -6,6 +6,7 @@
 #include <mutex>
 #ifdef _WIN32
 #    define WIN32_LEAN_AND_MEAN
+#    define NOMINMAX
 #    include <windows.h>
 #else
 #    include <sys/mman.h>
@@ -45,66 +46,82 @@
 #    endif
 #endif
 namespace re {
-    inline std::uint8_t *tryAllocateNear(std::uint8_t *nearest) {
-        if (!nearest)
+    struct NearAllocator {
+        RE_INLINE static auto alignDown(size_t addr, size_t align) -> size_t { return addr & ~(align - 1); }
+
+        RE_INLINE static auto alignUp(size_t addr, size_t align) -> size_t { return (addr + align - 1) & ~(align - 1); }
+
+        /**
+         * @brief try to allocate executable memory near the given address (within ~2GB).
+         *
+         * @param nearest
+         * @param size
+         * @return PVOID
+         */
+        [[nodiscard]] static auto alloc(const std::uint8_t *nearest, size_t size = 0x1000) -> PVOID {
+            if (nearest == nullptr)
+                return nullptr;
+
+            const uintptr_t range = 0x7FFFFFFF; // 2GB Limit
+            const uintptr_t align = 0x10000;    // Windows allocation granularity is usually 64KB.
+
+            auto base = reinterpret_cast<uintptr_t>(nearest);
+
+            // Calculate the search bounds,taking care to prevent overflow
+            uintptr_t minAddr = (base > range) ? (base - range) : size;
+            uintptr_t maxAddr = (std::numeric_limits<size_t>::max() - base > range)
+                                    ? (base + range)
+                                    : std::numeric_limits<size_t>::max();
+
+            MEMORY_BASIC_INFORMATION mbi{};
+            auto tryAllocInRegion = [&](const MEMORY_BASIC_INFORMATION &mbi, bool searchUp) -> PVOID {
+                if (mbi.State != MEM_FREE || mbi.RegionSize < size)
+                    return nullptr;
+
+                auto regionStart = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
+                size_t regionEnd = regionStart + mbi.RegionSize;
+                size_t candidate{};
+
+                if (searchUp) {
+                    candidate = alignUp(regionStart, align);
+                    if (candidate + size > regionEnd)
+                        return nullptr;
+                } else {
+                    candidate = alignDown(regionEnd - size, align);
+                    if (candidate < regionStart)
+                        return nullptr;
+                }
+
+                return VirtualAlloc(reinterpret_cast<void *>(candidate), size, MEM_COMMIT | MEM_RESERVE,
+                                    PAGE_EXECUTE_READWRITE);
+            };
+
+            // Search up
+            for (auto addr = base; addr < maxAddr;) {
+                if (!VirtualQuery(reinterpret_cast<LPCVOID>(addr), &mbi, sizeof(mbi)))
+                    break;
+
+                if (auto res = tryAllocInRegion(mbi, true); res)
+                    return res;
+                addr = reinterpret_cast<uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
+            }
+            // Search down
+            for (uintptr_t addr = base; addr > minAddr;) {
+                if (!VirtualQuery(reinterpret_cast<LPCVOID>(addr), &mbi, sizeof(mbi)))
+                    break;
+
+                if (auto res = tryAllocInRegion(mbi, false))
+                    return res;
+
+                uintptr_t prevAddr = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
+                if (prevAddr <= minAddr)
+                    break;
+                addr = prevAddr - 1;
+            }
             return nullptr;
-
-        const size_t allocSize = 0x1000;    // 分配一个页 (4KB)
-        const uintptr_t range = 0x7FFFFFFF; // 2GB 限制 (INT_MAX)
-        const uintptr_t align = 0x10000;    // Windows 分配粒度通常为 64KB
-
-        uintptr_t base = reinterpret_cast<uintptr_t>(nearest);
-
-        // 计算搜索边界，注意防止溢出
-        uintptr_t minAddr = (base > range) ? (base - range) : 0x10000;
-        uintptr_t maxAddr = (UINTPTR_MAX - base > range) ? (base + range) : UINTPTR_MAX;
-
-        MEMORY_BASIC_INFORMATION mbi;
-
-        // 1. 向上搜索 (从 nearest 到 maxAddr)
-        for (uintptr_t addr = base; addr < maxAddr;) {
-            if (!VirtualQuery(reinterpret_cast<LPCVOID>(addr), &mbi, sizeof(mbi)))
-                break;
-
-            if (mbi.State == MEM_FREE && mbi.RegionSize >= allocSize) {
-                // 在空闲区内寻找一个对齐的起始点
-                uintptr_t candidate = (reinterpret_cast<uintptr_t>(mbi.BaseAddress) + (align - 1)) & ~(align - 1);
-                if (candidate + allocSize <= reinterpret_cast<uintptr_t>(mbi.BaseAddress) + mbi.RegionSize) {
-                    void *res = VirtualAlloc(reinterpret_cast<void *>(candidate), allocSize, MEM_COMMIT | MEM_RESERVE,
-                                             PAGE_EXECUTE_READWRITE);
-                    if (res)
-                        return static_cast<std::uint8_t *>(res);
-                }
-            }
-            addr = reinterpret_cast<uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
         }
+    };
 
-        // 2. 向下搜索 (从 nearest 到 minAddr)
-        for (uintptr_t addr = base; addr > minAddr;) {
-            if (!VirtualQuery(reinterpret_cast<LPCVOID>(addr), &mbi, sizeof(mbi)))
-                break;
-
-            // 向下搜索时，VirtualQuery 得到的是当前块的基址，我们需要跳到前一个块
-            uintptr_t prevAddr = reinterpret_cast<uintptr_t>(mbi.BaseAddress) - 1;
-
-            if (mbi.State == MEM_FREE && mbi.RegionSize >= allocSize) {
-                // 尽量分配在空闲区的末尾，这样离目标更近
-                uintptr_t candidate =
-                    (reinterpret_cast<uintptr_t>(mbi.BaseAddress) + mbi.RegionSize - allocSize) & ~(align - 1);
-                if (candidate >= reinterpret_cast<uintptr_t>(mbi.BaseAddress)) {
-                    void *res = VirtualAlloc(reinterpret_cast<void *>(candidate), allocSize, MEM_COMMIT | MEM_RESERVE,
-                                             PAGE_EXECUTE_READWRITE);
-                    if (res)
-                        return static_cast<std::uint8_t *>(res);
-                }
-            }
-            if (prevAddr < minAddr)
-                break;
-            addr = prevAddr;
-        }
-
-        return nullptr;
-    }
     inline auto WriteProtectedMemory(void *address, const void *data, size_t size) -> bool {
 #if defined(_WIN32)
         DWORD oldProtect = 0;
@@ -399,7 +416,7 @@ namespace re {
                 LOG_WARN("Hook already installed, skipping");
                 return false;
             }
-            invocation_prologue = tryAllocateNear(reinterpret_cast<std::uint8_t *>(this->targetFn));
+            invocation_prologue = (std::uint8_t *)allocator.alloc(reinterpret_cast<std::uint8_t *>(this->targetFn));
             if (invocation_prologue == nullptr) {
                 LOG_ERROR("Failed to allocate memory for invocation prologue");
                 return false;
@@ -557,6 +574,7 @@ namespace re {
         std::size_t prologue_size{0};
         std::uint8_t *invocation_prologue{nullptr};
         std::mutex hookMutex;
+        NearAllocator allocator;
     };
 
     /**

@@ -331,8 +331,9 @@ bool IsPageExecutableReadWrite(void *ptr, size_t size = 0x1000) {
 }
 
 TEST_CASE("tryAllocateNear basic behavior", "[memory][allocation]") {
+    re::NearAllocator allocator;
     SECTION("传入 nullptr 应返回 nullptr") {
-        std::uint8_t *result = tryAllocateNear(nullptr);
+        PVOID result = allocator.alloc(nullptr);
         REQUIRE(result == nullptr);
     }
 
@@ -341,7 +342,7 @@ TEST_CASE("tryAllocateNear basic behavior", "[memory][allocation]") {
         std::uint8_t dummy = 0;
         std::uint8_t *target = &dummy;
 
-        std::uint8_t *allocated = tryAllocateNear(target);
+        PVOID allocated = allocator.alloc(target);
 
         // Windows 通常都能在 2GB 范围内找到 4KB 空闲页
         // 但极端情况下（内存碎片严重）也可能失败，所以这里用 INFO 而非 REQUIRE
@@ -369,9 +370,9 @@ TEST_CASE("tryAllocateNear basic behavior", "[memory][allocation]") {
 
     SECTION("尝试在已加载模块代码段附近分配（大概率失败或离得很远）") {
         // 拿一个大概率已经被占用的地址，例如当前函数自己的地址
-        std::uint8_t *code_addr = reinterpret_cast<std::uint8_t *>(tryAllocateNear);
+        std::uint8_t *code_addr = reinterpret_cast<std::uint8_t *>(allocator.alloc);
 
-        std::uint8_t *allocated = tryAllocateNear(code_addr);
+        PVOID allocated = allocator.alloc(code_addr);
 
         INFO("Trying near code address: " << (void *)code_addr);
 
@@ -389,11 +390,12 @@ TEST_CASE("tryAllocateNear basic behavior", "[memory][allocation]") {
 }
 
 TEST_CASE("tryAllocateNear distance check", "[memory][allocation][distance]") {
+    NearAllocator allcator;
     // 准备一个相对干净的参考点（栈上变量）
     std::uint8_t local_var = 0x77;
     std::uint8_t *reference = &local_var;
 
-    auto *ptr = tryAllocateNear(reference);
+    auto *ptr = allcator.alloc(reference);
 
     if (ptr) {
         uintptr_t ref_addr = reinterpret_cast<uintptr_t>(reference);
@@ -422,12 +424,12 @@ TEST_CASE("tryAllocateNear distance check", "[memory][allocation][distance]") {
 }
 
 TEST_CASE("tryAllocateNear testing", "[memory][allocator]") {
-
+NearAllocator allcator;
     // 准备一个基准地址，通常取当前函数的地址作为“最近地址”参考
-    auto *const nearest = reinterpret_cast<std::uint8_t *>(&tryAllocateNear);
+    auto *const nearest = reinterpret_cast<std::uint8_t *>(&NearAllocator::alloc);
 
     SECTION("基本分配逻辑测试") {
-        std::uint8_t *allocated = tryAllocateNear(nearest);
+        std::uint8_t* allocated = ( std::uint8_t*)allcator.alloc(nearest);
 
         // 1. 验证是否分配成功
         REQUIRE(allocated != nullptr);
@@ -463,11 +465,11 @@ TEST_CASE("tryAllocateNear testing", "[memory][allocator]") {
     }
 
     SECTION("边缘情况与压力测试") {
-        std::vector<std::uint8_t *> allocations;
+        std::vector<PVOID> allocations;
 
         // 连续分配 10 次，模拟内存被占用的情况
         for (int i = 0; i < 10; ++i) {
-            std::uint8_t *ptr = tryAllocateNear(nearest);
+            PVOID ptr = allcator.alloc(nearest);
             if (ptr) {
                 allocations.push_back(ptr);
 
@@ -490,6 +492,6 @@ TEST_CASE("tryAllocateNear testing", "[memory][allocator]") {
 
     SECTION("NULL 输入安全性") {
         // 虽然业务逻辑可能保证不传入 NULL，但函数应该健壮
-        CHECK(tryAllocateNear(nullptr) == nullptr);
+        CHECK(allcator.alloc(nullptr) == nullptr);
     }
 }

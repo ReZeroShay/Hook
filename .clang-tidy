@@ -9,6 +9,8 @@ Checks: >
   -readability-braces-around-statements,
   cppcoreguidelines-*,
   -cppcoreguidelines-pro-type-vararg,
+  -cppcoreguidelines-pro-type-reinterpret-cast,
+  -performance-no-int-to-ptr,
   microsoft-*
 
 HeaderFilterRegex: '.*'
