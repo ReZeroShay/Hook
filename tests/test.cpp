@@ -32,9 +32,6 @@ RE_NOINLINE void simple_void_noargs() {
 // ────────────────────────────────────────────────
 
 TEST_CASE("InlineHook - basic replace hook", "[hook][replace]") {
-    using HookT = InlineHook<decltype(&simple_add)>;
-
-    HookT hook;
 
     int (*original)(int, int) = simple_add;
 
@@ -51,10 +48,13 @@ TEST_CASE("InlineHook - basic replace hook", "[hook][replace]") {
         g_last_arg = (int64_t)b << 32 | a; // swapped
         return a * b;
     };
-    hook.withDetourFn(detour).withTargetFn(simple_add).withType(ReplaceHook).withPassThrough(false);
-    bool ok = hook.install();
+    InlineHookParams params{
+        .type = ReplaceHook, .detourFn = detour, .targetFn = simple_add, .useOriginalResult = false};
+    auto hook = makeInlineHook<decltype(&simple_add)>(params);
+
+    bool ok = hook->install();
     REQUIRE(ok == true);
-    REQUIRE(hook.hooked == true);
+    REQUIRE(hook->hooked == true);
 
     // call through hook
     int result = simple_add(3, 4);
@@ -64,8 +64,8 @@ TEST_CASE("InlineHook - basic replace hook", "[hook][replace]") {
     REQUIRE(g_last_arg == ((int64_t)4 << 32 | 3)); // swapped
 
     // uninstall
-    REQUIRE(hook.uninstall() == true);
-    REQUIRE(hook.hooked == false);
+    REQUIRE(hook->uninstall() == true);
+    REQUIRE(hook->hooked == false);
 
     // should be back to original
     REQUIRE(simple_add(5, 6) == 11);
@@ -78,28 +78,23 @@ __declspec(noinline) auto detour_enter(int a, int b) -> int {
     return 999; // this value should be ignored
 };
 TEST_CASE("InlineHook - enter hook preserves original result", "[hook][enter]") {
-    using HookT = InlineHook<decltype(&simple_add)>;
-
-    HookT hook;
-
     g_side_effect = 0;
 
-    hook.withDetourFn(detour_enter).withTargetFn(simple_add).withType(EnterHook).withPassThrough(true);
+    InlineHookParams params{
+        .type = EnterHook, .detourFn = detour_enter, .targetFn = simple_add, .useOriginalResult = true};
+    auto hook = makeInlineHook<decltype(&simple_add)>(params);
 
-    REQUIRE(hook.install());
+    REQUIRE(hook->install());
 
     int res = simple_add(10, 20);
 
     REQUIRE(res == 30);                   // original result kept
     REQUIRE(g_side_effect == 2000 + 100); // both side effects happened
 
-    hook.uninstall();
+    hook->uninstall();
 }
 
 TEST_CASE("InlineHook - exit hook can override result", "[hook][exit]") {
-    using HookT = InlineHook<decltype(&simple_add)>;
-
-    HookT hook;
 
     g_side_effect = 0;
 
@@ -107,22 +102,20 @@ TEST_CASE("InlineHook - exit hook can override result", "[hook][exit]") {
         g_side_effect += 5000;
         return 7777; // override result
     };
+    InlineHookParams params{
+        .type = EnterHook, .detourFn = detour_exit, .targetFn = simple_add, .useOriginalResult = false};
+    auto hook = makeInlineHook<decltype(&simple_add)>(params);
 
-    hook.withDetourFn(detour_exit).withTargetFn(simple_add).withType(ExitHook).withPassThrough(false);
-
-    REQUIRE(hook.install());
+    REQUIRE(hook->install());
 
     int res = simple_add(1, 1);
 
     REQUIRE(res == 7777); // overridden
     REQUIRE(g_side_effect == 5000 + 100);
 
-    hook.uninstall();
+    hook->uninstall();
 }
 TEST_CASE("InlineHook - void function hook", "[hook][void]") {
-    using HookT = InlineHook<decltype(&simple_void_noargs)>;
-
-    HookT hook;
 
     g_side_effect = 0;
 
@@ -131,15 +124,17 @@ TEST_CASE("InlineHook - void function hook", "[hook][void]") {
         g_side_effect += 30000;
     };
 
-    hook.withDetourFn(detour_void).withTargetFn(simple_void_noargs).withType(ReplaceHook).withPassThrough(false);
+    InlineHookParams params{
+        .type = ReplaceHook, .detourFn = detour_void, .targetFn = simple_void_noargs, .useOriginalResult = false};
+    auto hook = makeInlineHook<decltype(&simple_void_noargs)>(params);
 
-    REQUIRE(hook.install());
+    REQUIRE(hook->install());
 
     simple_void_noargs();
 
     REQUIRE(g_side_effect == 30000);
 
-    hook.uninstall();
+    hook->uninstall();
 
     simple_void_noargs();
     REQUIRE(g_side_effect == 30000 + 777);
@@ -178,10 +173,6 @@ RE_NOINLINE void multi_param_void(int a, char b, const char *c) {
 // ... (include the previous 5 TEST_CASE here for completeness, but omitted for brevity)
 
 TEST_CASE("InlineHook - replace hook with multi params", "[hook][replace][multi-param]") {
-    using HookT = InlineHook<decltype(&multi_param_add)>;
-
-    HookT hook;
-
     g_side_effect = 0;
     g_args_log.clear();
 
@@ -193,9 +184,11 @@ TEST_CASE("InlineHook - replace hook with multi params", "[hook][replace][multi-
         g_side_effect += 9000;
         return a * b * c * d;
     };
-    hook.withDetourFn(detour).withTargetFn(multi_param_add).withType(ReplaceHook).withPassThrough(false);
+    InlineHookParams params{
+        .type = ReplaceHook, .detourFn = detour, .targetFn = multi_param_add, .useOriginalResult = false};
+    auto hook = makeInlineHook<decltype(&multi_param_add)>(params);
 
-    bool ok = hook.install();
+    bool ok = hook->install();
     REQUIRE(ok);
 
     int result = multi_param_add(1, 2, 3, 4);
@@ -208,17 +201,13 @@ TEST_CASE("InlineHook - replace hook with multi params", "[hook][replace][multi-
     // So g_side_effect should only +=9000, no +100
     // Fix: REQUIRE(g_side_effect == 9000);
 
-    hook.uninstall();
+    hook->uninstall();
 
     REQUIRE(multi_param_add(5, 6, 7, 8) == 26);
     REQUIRE(g_side_effect == 9000 + 200); // after uninstall
 }
 
 TEST_CASE("InlineHook - enter hook with float params and return", "[hook][enter][float]") {
-    using HookT = InlineHook<decltype(&float_return)>;
-
-    HookT hook;
-
     g_side_effect = 0;
 
     REQUIRE(float_return(2.5, 3.0f) == 7.5);
@@ -229,21 +218,19 @@ TEST_CASE("InlineHook - enter hook with float params and return", "[hook][enter]
         return x + y; // ignored since use_original_result=true
     };
 
-    hook.withDetourFn(detour).withTargetFn(float_return).withType(EnterHook).withPassThrough(true);
-    REQUIRE(hook.install());
+    InlineHookParams params{.type = EnterHook, .detourFn = detour, .targetFn = float_return, .useOriginalResult = true};
+    auto hook = makeInlineHook<decltype(&float_return)>(params);
+
+    REQUIRE(hook->install());
 
     double res = float_return(2.5, 3.0f);
     REQUIRE(res == 7.5);                 // original result
     REQUIRE(g_side_effect == 2000 + 10); // detour + original side effect
 
-    hook.uninstall();
+    hook->uninstall();
 }
 
 TEST_CASE("InlineHook - replace hook with void multi params", "[hook][replace][void][multi-param]") {
-    using HookT = InlineHook<decltype(&multi_param_void)>;
-
-    HookT hook;
-
     g_side_effect = 0;
 
     multi_param_void(10, 'A', "test");
@@ -251,25 +238,25 @@ TEST_CASE("InlineHook - replace hook with void multi params", "[hook][replace][v
 
     auto detour = [](int a, char b, const char *c) {
         printf("noinline");
+        printf("noinline");
         g_side_effect += 30000 + strlen(c);
     };
 
-    hook.withDetourFn(detour).withTargetFn(multi_param_void).withType(ReplaceHook).withPassThrough(false);
-    REQUIRE(hook.install());
+    InlineHookParams params{
+        .type = ReplaceHook, .detourFn = detour, .targetFn = multi_param_void, .useOriginalResult = false};
+    auto hook = makeInlineHook<decltype(&multi_param_void)>(params);
+
+    REQUIRE(hook->install());
 
     multi_param_void(10, 'A', "test");
     REQUIRE(g_side_effect == 10 + 65 + 4 + 30000 + 4); // original first call + detour
 
     // In replace, original not called, so second call only detour: adjust accordingly
 
-    hook.uninstall();
+    hook->uninstall();
 }
 
 TEST_CASE("InlineHook - mixed hook types sequence", "[hook][mixed]") {
-    using HookT = InlineHook<decltype(&simple_add)>;
-
-    HookT hook_enter, hook_exit, hook_replace;
-
     g_side_effect = 0;
 
     // install enter
@@ -278,14 +265,17 @@ TEST_CASE("InlineHook - mixed hook types sequence", "[hook][mixed]") {
         g_side_effect += 1000;
         return 0;
     };
-    hook_enter.withDetourFn(detour_enter).withTargetFn(simple_add).withType(EnterHook).withPassThrough(true);
-    REQUIRE(hook_enter.install());
+    InlineHookParams params{
+        .type = EnterHook, .detourFn = detour_enter, .targetFn = simple_add, .useOriginalResult = true};
+    auto hook_enter = makeInlineHook<decltype(&simple_add)>(params);
+
+    REQUIRE(hook_enter->install());
 
     int res = simple_add(1, 2);
     REQUIRE(res == 3);
     REQUIRE(g_side_effect == 1000 + 100);
 
-    hook_enter.uninstall();
+    hook_enter->uninstall();
 
     // Now exit
     auto detour_exit = [](int a, int b) -> int {
@@ -293,14 +283,16 @@ TEST_CASE("InlineHook - mixed hook types sequence", "[hook][mixed]") {
         g_side_effect += 2000;
         return 999;
     };
-    hook_exit.withDetourFn(detour_exit).withTargetFn(simple_add).withType(ExitHook).withPassThrough(false);
-    REQUIRE(hook_exit.install());
+    params =
+        InlineHookParams{.type = ExitHook, .detourFn = detour_exit, .targetFn = simple_add, .useOriginalResult = false};
+    auto hook_exit = makeInlineHook<decltype(&simple_add)>(params);
+    REQUIRE(hook_exit->install());
 
     res = simple_add(1, 2);
     REQUIRE(res == 999);
     REQUIRE(g_side_effect == 1000 + 100 + 2000 + 100);
 
-    hook_exit.uninstall();
+    hook_exit->uninstall();
 
     // Now replace
     auto detour_replace = [](int a, int b) -> int {
@@ -308,14 +300,16 @@ TEST_CASE("InlineHook - mixed hook types sequence", "[hook][mixed]") {
         g_side_effect += 3000;
         return a * b;
     };
-    hook_replace.withDetourFn(detour_replace).withTargetFn(simple_add).withType(ReplaceHook).withPassThrough(false);
-    REQUIRE(hook_replace.install());
+    params = InlineHookParams{
+        .type = ReplaceHook, .detourFn = detour_replace, .targetFn = simple_add, .useOriginalResult = false};
+    auto hook_replace = makeInlineHook<decltype(&simple_add)>(params);
+    REQUIRE(hook_replace->install());
 
     res = simple_add(1, 2);
     REQUIRE(res == 2);
     REQUIRE(g_side_effect == 1000 + 100 + 2000 + 100 + 3000); // no original side effect in replace
 
-    hook_replace.uninstall();
+    hook_replace->uninstall();
 }
 
 #include <cstdint>
@@ -424,12 +418,12 @@ TEST_CASE("tryAllocateNear distance check", "[memory][allocation][distance]") {
 }
 
 TEST_CASE("tryAllocateNear testing", "[memory][allocator]") {
-NearAllocator allcator;
+    NearAllocator allcator;
     // 准备一个基准地址，通常取当前函数的地址作为“最近地址”参考
     auto *const nearest = reinterpret_cast<std::uint8_t *>(&NearAllocator::alloc);
 
     SECTION("基本分配逻辑测试") {
-        std::uint8_t* allocated = ( std::uint8_t*)allcator.alloc(nearest);
+        std::uint8_t *allocated = (std::uint8_t *)allcator.alloc(nearest);
 
         // 1. 验证是否分配成功
         REQUIRE(allocated != nullptr);

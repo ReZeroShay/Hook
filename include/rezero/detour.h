@@ -183,13 +183,13 @@ namespace re {
         ReplaceHook,
     };
     struct HookContext {
-        alignas(4) std::uint32_t reentrant{0};
-        void *userData{nullptr};
-        std::uint8_t *targetFn{nullptr};
-        std::uint8_t *detourFn{nullptr};
-        std::uint8_t *trampoline{nullptr};
         HookType type;
-        bool passThrough{false};
+        PVOID userData{nullptr};
+        PVOID targetFn{nullptr};
+        PVOID detourFn{nullptr};
+        PVOID trampoline{nullptr};
+        bool useOriginalResult{false};
+        alignas(4) std::uint32_t reentrant{0};
     };
 
     template <typename T> struct HookInvocation : HookContext {};
@@ -215,30 +215,30 @@ namespace re {
             return instance;
 #endif
         }
-        RE_NOINLINE static ReturnType invocationEntry(Args... args) {
+        RE_NOINLINE static auto invocationEntry(Args... args) -> ReturnType {
             return context()->dispatch(std::forward<Args>(args)...);
         }
-        inline ReturnType dispatch(Args... args) {
-            ReturnType original_result, new_result;
-            bool was_free = false;
+        auto dispatch(Args... args) -> ReturnType {
+            ReturnType originalResult{};
+            ReturnType newResult{};
 
             ReentrantGuard guard(&this->reentrant);
             if (!guard) {
-                original_result = new_result = invokeOriginal(std::forward<Args>(args)...);
-                return original_result;
+                originalResult = newResult = invokeOriginal(std::forward<Args>(args)...);
+                return originalResult;
             }
 
             if (type == EnterHook) {
-                new_result = invokeDetour(std::forward<Args>(args)...);
-                original_result = invokeOriginal(std::forward<Args>(args)...);
+                newResult = invokeDetour(std::forward<Args>(args)...);
+                originalResult = invokeOriginal(std::forward<Args>(args)...);
             } else if (type == ExitHook) {
-                original_result = invokeOriginal(std::forward<Args>(args)...);
-                new_result = invokeDetour(std::forward<Args>(args)...);
+                originalResult = invokeOriginal(std::forward<Args>(args)...);
+                newResult = invokeDetour(std::forward<Args>(args)...);
             } else if (type == ReplaceHook) {
-                original_result = new_result = invokeDetour(std::forward<Args>(args)...);
+                originalResult = newResult = invokeDetour(std::forward<Args>(args)...);
             }
 
-            ReturnType result = passThrough ? original_result : new_result;
+            ReturnType result = useOriginalResult ? originalResult : newResult;
             return result;
         }
         /**
@@ -249,7 +249,7 @@ namespace re {
          * @param args Arguments to pass to the original function.
          * @return Result of the original function, or 0 if it returns void.
          */
-        inline ReturnType invokeOriginal(Args... args) {
+        auto invokeOriginal(Args... args) -> ReturnType {
             auto fn = reinterpret_cast<FnType>(trampoline);
             if constexpr (std::is_same_v<R, void>) {
                 fn(std::forward<Args>(args)...);
@@ -258,7 +258,7 @@ namespace re {
                 return fn(std::forward<Args>(args)...);
             }
         }
-        inline ReturnType invokeDetour(Args... args) {
+        auto invokeDetour(Args... args) -> ReturnType {
             auto fn = reinterpret_cast<FnType>(detourFn);
             if constexpr (std::is_same_v<R, void>) {
                 fn(std::forward<Args>(args)...);
@@ -311,9 +311,9 @@ namespace re {
 
         InlineHook() = default;
 
-        auto BuildJumpToInvocationPrologue() {
-            auto ins = jumpBuilder.jmpRel32(this->targetFn, this->invocation_prologue);
-            BuildTrampolineFromPrologue(this->targetFn, ins.size());
+        auto buildJumpToInvocationPrologue() {
+            auto ins = jumpBuilder.jmpRel32(this->targetFn, this->invocationPrologue);
+            buildTrampolineFromPrologue(static_cast<uint8_t *>(this->targetFn), ins.size());
             writeProtectedMemory((void *)this->targetFn, ins.data(), ins.size());
 #if defined(_MSC_VER)
             FlushInstructionCache(GetCurrentProcess(), NULL, 0);
@@ -334,12 +334,12 @@ namespace re {
                            0xFF, 0xE0};
 
         // clang-format on
-        auto BuildJumpToInvocation() {
+        auto buildJumpToInvocation() {
             uint64_t this2 = reinterpret_cast<uint64_t>(this);
             uint64_t invocationEntry2 = reinterpret_cast<uint64_t>(&HookInvocation<Fn>::invocationEntry);
             std::memcpy(&invocationAsm[2], &this2, 8);
             std::memcpy(&invocationAsm[21], &invocationEntry2, 8);
-            memcpy(invocation_prologue, invocationAsm, sizeof(invocationAsm));
+            memcpy(invocationPrologue, invocationAsm, sizeof(invocationAsm));
 #if defined(_MSC_VER)
             FlushInstructionCache(GetCurrentProcess(), NULL, 0);
 #elif defined(__GNUC__) || defined(__clang__)
@@ -353,7 +353,7 @@ namespace re {
                 LOG_WARN("Hook not installed, skipping uninstall");
                 return false;
             }
-            writeProtectedMemory((void *)this->targetFn, backup_prologue.data(), prologue_size);
+            writeProtectedMemory((void *)this->targetFn, backupPrologue.data(), prologueSize);
             hooked = false;
             return true;
         }
@@ -368,18 +368,18 @@ namespace re {
                 LOG_WARN("Hook already installed, skipping");
                 return false;
             }
-            invocation_prologue = (std::uint8_t *)allocator.alloc(reinterpret_cast<std::uint8_t *>(this->targetFn));
-            if (invocation_prologue == nullptr) {
+            invocationPrologue = (std::uint8_t *)allocator.alloc(reinterpret_cast<std::uint8_t *>(this->targetFn));
+            if (invocationPrologue == nullptr) {
                 LOG_ERROR("Failed to allocate memory for invocation prologue");
                 return false;
             }
-            this->trampoline = invocation_prologue + 200;
-            BuildJumpToInvocation();
-            BuildJumpToInvocationPrologue();
+            this->trampoline = invocationPrologue + 200;
+            buildJumpToInvocation();
+            buildJumpToInvocationPrologue();
             hooked = true;
             return true;
         }
-        bool BuildTrampolineFromPrologue(std::uint8_t *src, size_t size) {
+        bool buildTrampolineFromPrologue(std::uint8_t *src, size_t size) {
             size_t offset{0};
             ZydisDecoder decoder;
             ZydisDecodedInstruction instruction;
@@ -404,9 +404,10 @@ namespace re {
 
                     return false;
                 }
+                auto *trampoline2 = static_cast<uint8_t *>(this->trampoline);
                 // 复制原始指令到 trampoline
-                std::memcpy(&this->trampoline[offset], &src[offset], instruction.length);
-                std::memcpy(&backup_prologue[offset], &src[offset], instruction.length);
+                std::memcpy(&trampoline2[offset], &src[offset], instruction.length);
+                std::memcpy(&backupPrologue[offset], &src[offset], instruction.length);
                 // 处理指令中的相对位移,处理重定位 (Relative Addressing)
                 if (instruction.attributes & ZYDIS_ATTRIB_IS_RELATIVE) {
                     for (ZyanU8 i = 0; i < instruction.operand_count_visible; ++i) {
@@ -421,8 +422,8 @@ namespace re {
                             // 检查新位移是否超过指令对应的范围
                             intptr_t absolute_target =
                                 reinterpret_cast<intptr_t>(src + offset + instruction.length) + op->imm.value.s;
-                            intptr_t trampoline_rip_next =
-                                reinterpret_cast<intptr_t>(this->trampoline + offset + instruction.length);
+                            intptr_t trampoline_rip_next = reinterpret_cast<intptr_t>(
+                                static_cast<uint8_t *>(this->trampoline) + offset + instruction.length);
                             intptr_t new_disp = absolute_target - trampoline_rip_next;
 
                             // 检查能否用 size_in_bytes 表示
@@ -445,7 +446,8 @@ namespace re {
                                 return false;
                             }
                             size_t imm_offset_in_instr = instruction.length - size_in_bytes;
-                            uint8_t *patch_location = this->trampoline + offset + imm_offset_in_instr;
+                            uint8_t *patch_location =
+                                static_cast<uint8_t *>(this->trampoline) + offset + imm_offset_in_instr;
                             if (size_in_bytes == 1) {
                                 int8_t v8 = static_cast<int8_t>(new_disp);
                                 std::memcpy(patch_location, &v8, 1);
@@ -462,59 +464,50 @@ namespace re {
                 }
                 offset += instruction.length;
             } while (offset < size);
-            prologue_size = offset;
+            prologueSize = offset;
 
             // 在 trampoline 尾部添加跳转回原函数剩余部分的跳转指令
             auto jmpAsm = jumpBuilder.absoluteJump(offset);
-            memcpy(this->trampoline + offset, jmpAsm.data(), jmpAsm.size());
+            memcpy(static_cast<uint8_t *>(this->trampoline) + offset, jmpAsm.data(), jmpAsm.size());
             return true;
         }
 
-        /**
-         * @brief Set the user data pointer.
-         *
-         * The userData pointer must remain valid for the entire
-         * lifetime of this instance.
-         *
-         * @param userData Pointer to user-owned data.
-         */
-        constexpr auto &&withUserData(this auto &&self, void *userData) noexcept {
-            self.userData = userData;
-            return std::forward<decltype(self)>(self);
-        }
-        constexpr auto &&withPassThrough(this auto &&self, bool passThrough) noexcept {
-            self.passThrough = passThrough;
-            return std::forward<decltype(self)>(self);
-        }
-        constexpr auto &&withType(this auto &&self, HookType type) noexcept {
-            self.type = type;
-            return std::forward<decltype(self)>(self);
-        }
-        constexpr auto &&withTargetFn(this auto &&self, FnType targetFn) noexcept {
-            self.targetFn = reinterpret_cast<std::uint8_t *>(targetFn);
-            return std::forward<decltype(self)>(self);
-        }
-        constexpr auto &&withDetourFn(this auto &&self, FnType detourFn) noexcept {
-            self.detourFn = reinterpret_cast<std::uint8_t *>(detourFn);
-            return std::forward<decltype(self)>(self);
-        }
         bool hooked{false};
-        std::array<std::uint8_t, 200> backup_prologue;
-        std::size_t prologue_size{0};
-        std::uint8_t *invocation_prologue{nullptr};
+        std::array<std::uint8_t, 200> backupPrologue{};
+        std::size_t prologueSize{0};
+        std::uint8_t *invocationPrologue{nullptr};
         std::mutex hookMutex;
         NearAllocator allocator;
         JumpBuilder jumpBuilder;
     };
 
+    struct InlineHookParams {
+        HookType type{};
+        PVOID detourFn{nullptr};
+        PVOID targetFn{nullptr};
+        //  userData Pointer to user-owned data.,The userData pointer must remain valid for the entire
+        // lifetime of this instance.
+        PVOID userData{nullptr};
+        // use the original function's return valule instead of detour function'su
+        bool useOriginalResult{false};
+    };
+
     /**
      * @brief Creates a persistent InlineHook instance.
+     *
      * @tparam Fn Target function signature.
+     * @param params
      * @return Pointer to an InlineHook instance allocated on the heap.
      */
-    template <typename Fn> [[nodiscard]] RE_INLINE inline InlineHook<Fn> *makeInlineHook() {
-        auto *instance = new (std::nothrow) InlineHook<Fn>();
-        return instance;
+    template <typename Fn>
+    [[nodiscard]] RE_INLINE inline InlineHook<Fn> *makeInlineHook(const InlineHookParams &params) {
+        auto *self = new (std::nothrow) InlineHook<Fn>();
+        self->targetFn = params.targetFn;
+        self->detourFn = params.detourFn;
+        self->type = params.type;
+        self->userData = params.userData;
+        self->useOriginalResult = params.useOriginalResult;
+        return self;
     }
 
 #if defined(_MSC_VER)
