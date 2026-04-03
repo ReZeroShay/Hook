@@ -11,6 +11,8 @@ Checks: >
   -cppcoreguidelines-pro-type-vararg,
   -cppcoreguidelines-pro-type-reinterpret-cast,
   -performance-no-int-to-ptr,
+  -cppcoreguidelines-avoid-magic-numbers,
+  -readability-magic-numbers,
   microsoft-*
 
 HeaderFilterRegex: '.*'

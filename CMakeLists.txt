@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21.0)
 project(detour VERSION 0.1.0 LANGUAGES C CXX)
 
-
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 add_library(${PROJECT_NAME} STATIC deps/Zydis/Zydis.c)
 target_compile_definitions(${PROJECT_NAME} PUBLIC ZYDIS_STATIC_DEFINE)
 target_compile_features(${PROJECT_NAME} PUBLIC cxx_std_23)

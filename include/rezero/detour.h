@@ -122,10 +122,10 @@ namespace re {
         }
     };
 
-    inline auto WriteProtectedMemory(void *address, const void *data, size_t size) -> bool {
+    inline auto writeProtectedMemory(void *address, const void *data, size_t size) -> bool {
 #if defined(_WIN32)
-        DWORD oldProtect = 0;
-        DWORD temp;
+        DWORD oldProtect{};
+        DWORD temp{};
         if (!VirtualProtect(address, size, PAGE_EXECUTE_READWRITE, &oldProtect)) {
             LOG_ERROR("VirtualProtect failed\n");
             return false;
@@ -160,8 +160,8 @@ namespace re {
     }
 
     RE_INLINE inline void LeaveReentrantSection(std::uint32_t *reentrant) {
-        auto old_val = _InterlockedExchange(reentrant, 0);
-        _Analysis_assume_(old_val == 1);
+        auto oldValue = _InterlockedExchange(reentrant, 0);
+        _Analysis_assume_(oldValue == 1);
     }
     struct ReentrantGuard {
         bool entered;
@@ -185,8 +185,8 @@ namespace re {
     struct HookContext {
         alignas(4) std::uint32_t reentrant{0};
         void *userData{nullptr};
-        std::uint8_t *targetFn{nullptr}; // 原函数地址
-        std::uint8_t *detourFn{nullptr}; // 用户传入的 hook 回调函数
+        std::uint8_t *targetFn{nullptr};
+        std::uint8_t *detourFn{nullptr};
         std::uint8_t *trampoline{nullptr};
         HookType type;
         bool passThrough{false};
@@ -268,41 +268,53 @@ namespace re {
             }
         }
     };
+    struct JumpBuilder {
+
+        // push imm32
+        // mov dword ptr [rsp+4], imm32
+        // ret
+        RE_INLINE auto absoluteJump(intptr_t dest) -> std::array<uint8_t, 14> {
+            std::array<uint8_t, 14> code{};
+
+            auto low = static_cast<uint32_t>(dest & 0xFFFFFFFF);
+            auto high = static_cast<uint32_t>((uint64_t)dest >> 32);
+
+            code[0] = 0x68;
+            *reinterpret_cast<uint32_t *>(&code[1]) = low;
+            code[5] = 0xC7;
+            code[6] = 0x44;
+            code[7] = 0x24;
+            code[8] = 0x04;
+            *reinterpret_cast<uint32_t *>(&code[9]) = high;
+            code[13] = 0xC3;
+
+            return code;
+        }
+
+        // JMP rel32 opcode
+        RE_INLINE auto jmpRel32(PVOID src, PVOID dest) -> std::array<uint8_t, 5> {
+            std::array<uint8_t, 5> code{};
+            auto src2 = reinterpret_cast<intptr_t>(src);
+            auto dest2 = reinterpret_cast<intptr_t>(dest);
+
+            intptr_t disp = dest2 - (src2 + 5);
+
+            code[0] = 0xE9;
+            auto disp32 = static_cast<int32_t>(disp);
+            std::memcpy(&code[1], &disp32, sizeof(disp32));
+            return code;
+        }
+    };
     template <typename Fn> struct InlineHook : HookInvocation<Fn> {
         using FnType = typename HookInvocation<Fn>::FnType;
         using typename HookInvocation<Fn>::context;
 
-        constexpr InlineHook() {}
+        InlineHook() = default;
 
         auto BuildJumpToInvocationPrologue() {
-            ZyanUSize length = ZYDIS_MAX_INSTRUCTION_LENGTH;
-            std::array<ZyanU8, ZYDIS_MAX_INSTRUCTION_LENGTH> encoded;
-            ZydisEncoderRequest req{};
-            memset(&req, 0, sizeof(req));
-            req.branch_width = ZYDIS_BRANCH_WIDTH_32;
-            req.mnemonic = ZYDIS_MNEMONIC_JMP;
-            req.machine_mode = ZYDIS_MACHINE_MODE_LONG_64;
-            req.operand_count = 1;
-
-            // 假设当前指令的 RIP = 0x00007FF612341000
-            // 目标地址           = 0x00007FF612341500
-            // 则 disp = 目标 - (当前RIP + 指令长度) = 0x500 - 5 = 0x4FB
-            // 你自己提前算好的相对偏移
-            ZyanI64 cur_rip = reinterpret_cast<ZyanI64>(this->targetFn);
-            ZyanI64 jmp_addr = reinterpret_cast<ZyanI64>(this->invocation_prologue);
-            ZyanI64 inst_length = 5;
-            ZyanI64 disp = jmp_addr - (cur_rip + inst_length);
-
-            req.operands[0].type = ZYDIS_OPERAND_TYPE_IMMEDIATE;
-            req.operands[0].imm.s = disp;
-
-            if (auto result = ZydisEncoderEncodeInstruction(&req, &encoded[0], &length); ZYAN_FAILED(result)) {
-                LOG_ERROR("Instruction encoding failed: mnemonic=%d statuss=0x%08X,jmp_addr %I64x,cur_rip %I64x",
-                          req.mnemonic, result, jmp_addr, cur_rip);
-                return false;
-            }
-            BuildTrampolineFromPrologue(this->targetFn, length);
-            WriteProtectedMemory((void *)this->targetFn, encoded.data(), length);
+            auto ins = jumpBuilder.jmpRel32(this->targetFn, this->invocation_prologue);
+            BuildTrampolineFromPrologue(this->targetFn, ins.size());
+            writeProtectedMemory((void *)this->targetFn, ins.data(), ins.size());
 #if defined(_MSC_VER)
             FlushInstructionCache(GetCurrentProcess(), NULL, 0);
 #elif defined(__GNUC__) || defined(__clang__)
@@ -311,83 +323,23 @@ namespace re {
 #endif
             return true;
         }
-        RE_INLINE std::array<uint8_t, 14> buildAbsoluteJump(intptr_t dest) {
-            std::array<uint8_t, 14> code{};
+        // mov rax, this
+        // mov gs:[0x28], rax
+        // mov rax, invocationEntry
+        // jmp rax
+        // clang-format off
+        uint8_t invocationAsm[31] = {0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0,
+                           0x65, 0x48, 0x89, 0x04, 0x25, 0x28, 0x00, 0x00, 0x00,
+                           0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0,
+                           0xFF, 0xE0};
 
-            uint32_t low = static_cast<uint32_t>(dest & 0xFFFFFFFF);
-            uint32_t high = static_cast<uint32_t>((uint64_t)dest >> 32);
-
-            // push imm32
-            code[0] = 0x68;
-            *reinterpret_cast<uint32_t *>(&code[1]) = low;
-
-            // mov dword ptr [rsp+4], imm32
-            code[5] = 0xC7;
-            code[6] = 0x44;
-            code[7] = 0x24;
-            code[8] = 0x04;
-            *reinterpret_cast<uint32_t *>(&code[9]) = high;
-
-            // ret
-            code[13] = 0xC3;
-
-            return code;
-        }
+        // clang-format on
         auto BuildJumpToInvocation() {
-            std::array<ZydisEncoderRequest, 4> req;
-            std::array<ZyanU8, ZYDIS_MAX_INSTRUCTION_LENGTH * 4> encoded;
-            size_t length{0};
-            memset(&req, 0, sizeof(req));
-            // 1. mov rax, imm64
-            req[0].mnemonic = ZYDIS_MNEMONIC_MOV;
-            req[0].machine_mode = ZYDIS_MACHINE_MODE_LONG_64;
-            req[0].operand_count = 2;
-            req[0].operands[0].type = ZYDIS_OPERAND_TYPE_REGISTER;
-            req[0].operands[0].reg.value = ZYDIS_REGISTER_RAX;
-            req[0].operands[1].type = ZYDIS_OPERAND_TYPE_IMMEDIATE;
-            req[0].operands[1].imm.u = reinterpret_cast<ZyanU64>(this);
-
-            // 2. mov qword ptr fs:[fs_offset], rax
-            req[1].mnemonic = ZYDIS_MNEMONIC_MOV;
-            req[1].machine_mode = ZYDIS_MACHINE_MODE_LONG_64;
-            req[1].operand_count = 2;
-            req[1].prefixes = ZYDIS_ATTRIB_HAS_SEGMENT_GS;
-            req[1].operands[0].type = ZYDIS_OPERAND_TYPE_MEMORY;
-            req[1].operands[0].mem.base = ZYDIS_REGISTER_NONE;
-            req[1].operands[0].mem.index = ZYDIS_REGISTER_NONE;
-            req[1].operands[0].mem.scale = 0;
-#ifdef _WIN32
-            req[1].operands[0].mem.displacement = 0x28;
-
-#else
-            req[1].operands[0].mem.displacement = -0x20;
-#endif
-            req[1].operands[0].mem.size = 8;
-
-            req[1].operands[1].type = ZYDIS_OPERAND_TYPE_REGISTER;
-            req[1].operands[1].reg.value = ZYDIS_REGISTER_RAX;
-            req[2].mnemonic = ZYDIS_MNEMONIC_MOV;
-            req[2].machine_mode = ZYDIS_MACHINE_MODE_LONG_64;
-            req[2].operand_count = 2;
-            req[2].operands[0].type = ZYDIS_OPERAND_TYPE_REGISTER;
-            req[2].operands[0].reg.value = ZYDIS_REGISTER_RAX;
-            req[2].operands[1].type = ZYDIS_OPERAND_TYPE_IMMEDIATE;
-            req[2].operands[1].imm.s = reinterpret_cast<intptr_t>(&HookInvocation<Fn>::invocationEntry);
-            req[3].mnemonic = ZYDIS_MNEMONIC_JMP;
-            req[3].machine_mode = ZYDIS_MACHINE_MODE_LONG_64;
-            req[3].operand_count = 1;
-            req[3].operands[0].type = ZYDIS_OPERAND_TYPE_REGISTER;
-            req[3].operands[0].reg.value = ZYDIS_REGISTER_RAX;
-            for (auto &item : req) {
-                ZyanUSize encoded_length = ZYDIS_MAX_INSTRUCTION_LENGTH;
-                if (auto result = ZydisEncoderEncodeInstruction(&item, &encoded[length], &encoded_length);
-                    ZYAN_FAILED(result)) {
-                    LOG_ERROR("Instruction encoding failed: mnemonic=%d statuss=0x%08X", item.mnemonic, result);
-                    return false;
-                }
-                length += encoded_length;
-            }
-            memcpy(invocation_prologue, encoded.data(), length);
+            uint64_t this2 = reinterpret_cast<uint64_t>(this);
+            uint64_t invocationEntry2 = reinterpret_cast<uint64_t>(&HookInvocation<Fn>::invocationEntry);
+            std::memcpy(&invocationAsm[2], &this2, 8);
+            std::memcpy(&invocationAsm[21], &invocationEntry2, 8);
+            memcpy(invocation_prologue, invocationAsm, sizeof(invocationAsm));
 #if defined(_MSC_VER)
             FlushInstructionCache(GetCurrentProcess(), NULL, 0);
 #elif defined(__GNUC__) || defined(__clang__)
@@ -401,7 +353,7 @@ namespace re {
                 LOG_WARN("Hook not installed, skipping uninstall");
                 return false;
             }
-            WriteProtectedMemory((void *)this->targetFn, backup_prologue.data(), prologue_size);
+            writeProtectedMemory((void *)this->targetFn, backup_prologue.data(), prologue_size);
             hooked = false;
             return true;
         }
@@ -513,31 +465,8 @@ namespace re {
             prologue_size = offset;
 
             // 在 trampoline 尾部添加跳转回原函数剩余部分的跳转指令
-            ZydisEncoderRequest req;
-            ZyanU8 encoded[ZYDIS_MAX_INSTRUCTION_LENGTH];
-            ZyanUSize encoded_length{ZYDIS_MAX_INSTRUCTION_LENGTH};
-
-            memset(&req, 0, sizeof(req));
-            req.mnemonic = ZYDIS_MNEMONIC_JMP;
-            req.branch_type = ZYDIS_BRANCH_TYPE_NEAR;
-            req.machine_mode = ZYDIS_MACHINE_MODE_LONG_64;
-            req.operand_count = 1;
-
-            req.operands[0].type = ZYDIS_OPERAND_TYPE_MEMORY;
-            req.operands[0].mem.base = ZYDIS_REGISTER_RIP;
-            req.operands[0].mem.index = ZYDIS_REGISTER_NONE;
-            req.operands[0].mem.scale = 0;
-            req.operands[0].mem.displacement = 0;
-            req.operands[0].mem.size = 8;
-
-            status = ZydisEncoderEncodeInstruction(&req, encoded, &encoded_length);
-            if (ZYAN_FAILED(status)) {
-                LOG_ERROR("Instruction encoding failed: mnemonic=%d statuss=0x%08X", req.mnemonic, status);
-                return false;
-            }
-            memcpy(this->trampoline + offset, encoded, encoded_length);
-            *reinterpret_cast<uint64_t *>(this->trampoline + offset + encoded_length) =
-                reinterpret_cast<uint64_t>(src + offset);
+            auto jmpAsm = jumpBuilder.absoluteJump(offset);
+            memcpy(this->trampoline + offset, jmpAsm.data(), jmpAsm.size());
             return true;
         }
 
@@ -575,6 +504,7 @@ namespace re {
         std::uint8_t *invocation_prologue{nullptr};
         std::mutex hookMutex;
         NearAllocator allocator;
+        JumpBuilder jumpBuilder;
     };
 
     /**

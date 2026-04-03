@@ -1,0 +1,7 @@
+[
+  {
+    "directory": "d:/Hook",
+    "file": "d:/Hook/include/rezero/detour.h",
+    "command": "clang-cl /std:c++23 -D_HAS_CXX23=1 -ID:/Hook/include"
+  }
+]
